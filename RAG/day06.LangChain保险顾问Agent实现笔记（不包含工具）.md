@@ -174,26 +174,33 @@ async def chat(
 ### 4.2 业务层（`app/modules/chat/service.py`）
 
 ```python
-async def chat_stream(self, user_id, request):
-    # 1. 校验会话归属
-    chat_thread = await self.chat_thread_repository.find_owned(request.thread_id, user_id)
-    if chat_thread is None:
-        raise ChatThreadNotFoundError
-
-    # 2. 组装输入 & 配置（thread_id 是关键）
-    _input = {'messages': [HumanMessage(content=request.message)]}
-    _config = RunnableConfig(configurable={'thread_id': str(request.thread_id)})
-
-    # 3. v3 协议获取异步事件流
-    stream = await self.agent.astream_events(_input, config=_config, version="v3")
-
-    # 4. 只取文本增量，逐块推给前端
-    async for message in stream.messages:
-        async for text in message.text:
-            yield ServerSentEvent(data=text, event="message")
-
-    # 5. 结束标识
-    yield ServerSentEvent(data="[DONE]", event="done")
+class ChatService:
+    def __init__(self, session: AsyncSession, agent: CompiledStateGraph):
+        self.session = session
+        # 创建操作会话表的数据访问层对象
+        self.chat_thread_repository = ChatThreadRepository(session)
+        # 为当前对象设置 agent 属性
+        self.agent = agent
+    async def chat_stream(self, user_id, request):
+        # 1. 校验会话归属
+        chat_thread = await self.chat_thread_repository.find_owned(request.thread_id, user_id)
+        if chat_thread is None:
+            raise ChatThreadNotFoundError
+    
+        # 2. 组装输入 & 配置（thread_id 是关键）
+        _input = {'messages': [HumanMessage(content=request.message)]}
+        _config = RunnableConfig(configurable={'thread_id': str(request.thread_id)})
+    
+        # 3. v3 协议获取异步事件流
+        stream = await self.agent.astream_events(_input, config=_config, version="v3")
+    
+        # 4. 只取文本增量，逐块推给前端
+        async for message in stream.messages:
+            async for text in message.text:
+                yield ServerSentEvent(data=text, event="message")
+    
+        # 5. 结束标识
+        yield ServerSentEvent(data="[DONE]", event="done")
 ```
 
 ### 4.3 SSE 工作原理
@@ -240,7 +247,7 @@ async def get_history(self, thread_id, user_id):
     # 从 Checkpointer 拿会话快照
     _config = RunnableConfig(configurable={'thread_id': str(thread_id)})
     snapshot = await self.agent.aget_state(config=_config)
-
+    chat_message_list = []  # 定义列表存储前端需要的聊天消息对象
     # 从快照里取 messages，过滤出 user / assistant 的文本消息
     messages = snapshot.values.get('messages', [])
     for message in messages:
